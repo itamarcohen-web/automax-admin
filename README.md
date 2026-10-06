@@ -21,7 +21,8 @@
 | `supabase/manual/` | `add_first_admin.sql`, `verify_admin_security.sql` |
 | `supabase/rollback/` | `rollback_admin.sql` |
 | `tests/` | `edge/` (Edge Function), `frontend/`, `security/`, `sql/` (Postgres אמיתי), `e2e/mock-supabase.mjs` (שרת דמה) |
-| `scripts/` | `postbuild.mjs` (כותרות אבטחה + CSP), `scan-secrets.mjs`, `serve-out.mjs`, `demo.mjs` |
+| `scripts/` | `postbuild.mjs`, `security-headers.mjs`, `gen-vercel-json.mjs`, `check-env.mjs`, `scan-secrets.mjs`, `serve-out.mjs`, `demo.mjs` |
+| `vercel.json`, `.github/` | הגדרות Vercel (כותרות + rewrite) ו‑CI |
 
 ## 1. הרצה מקומית
 
@@ -51,7 +52,7 @@ npm run dev
 בדיקות:
 
 ```bash
-npm run check      # typecheck + lint + 114 בדיקות vitest + סריקת סודות
+npm run check      # typecheck + lint + 119 בדיקות vitest + סריקת סודות
 npm run test:sql   # 181 בדיקות על PostgreSQL אמיתי (pip install pgserver "psycopg[binary]")
 npm run build      # בנייה לפרודקשן ל‑out/
 ```
@@ -103,42 +104,64 @@ npx supabase functions deploy admin-api
 3. היכנסו ל‑`https://admin.auto-max.co.il`, ועברו ל‑**Settings → Enable two-factor**.
 4. אחרי שה‑MFA פועל: `npx supabase secrets set ADMIN_REQUIRE_MFA=true`.
 
-## 5. פריסה (Cloudflare Pages – חינם, מתאים גם לשימוש מסחרי)
+## 5. GitHub + Vercel
 
-(Vercel Hobby אסור לשימוש מסחרי, ולכן לא נבחר.)
+> **שימו לב:** התוכנית החינמית של Vercel (Hobby) מיועדת לשימוש **לא מסחרי** בלבד לפי תנאי השימוש שלהם. AutoMax הוא מוצר מסחרי, ולכן לשימוש עסקי צריך Vercel Pro (בתשלום).
+> אם חשוב לכם חינם לגמרי ומותר מסחרית – Cloudflare Pages (סעיף 5ב). הקוד תומך בשניהם.
 
-**אפשרות א – העלאה ישירה:**
+### העלאה ל‑GitHub
 
 ```bash
-# הגדירו את שני משתני ה‑NEXT_PUBLIC_ בטרמינל (או ב‑.env.local), ואז:
+git init -b main
+git add .
+git status          # תוודאו שאין .env.local, out/, node_modules/ (כולם ב‑.gitignore)
+git commit -m "AutoMax Admin"
+git remote add origin https://github.com/<user>/automax-admin.git
+git push -u origin main
+```
+
+מומלץ **Private repository**. `npm run scan:secrets` מריץ בדיקה שאין מפתח סודי בקבצים; ה‑CI (`.github/workflows/ci.yml`) מריץ typecheck, lint, בדיקות, build וסריקת סודות על כל push.
+אל תעלו `.env.local`, ואל תכניסו `service_role` לשום משתנה של Vercel/GitHub – הוא קיים רק כסוד של ה‑Edge Function ב‑Supabase.
+
+### פריסה ב‑Vercel
+
+1. vercel.com → **Add New → Project** → Import של ה‑repo. Framework: **Next.js** (מזוהה לבד; `vercel.json` כבר מגדיר Build Command, `npm ci` ו‑Output Directory `out`).
+2. **Environment Variables** (Production + Preview) – רק שניים:
+   * `NEXT_PUBLIC_SUPABASE_URL` = `https://<project-ref>.supabase.co`
+   * `NEXT_PUBLIC_SUPABASE_ANON_KEY` = המפתח **הציבורי** `sb_publishable_…`
+   ה‑build נעצר בכוונה אם חסר משתנה או אם הוזן מפתח סודי (`scripts/check-env.mjs`).
+3. Deploy. הכותרות (CSP קפדני, HSTS וכו') וה‑rewrite של `/users/<id>` מגיעים מ‑`vercel.json`.
+4. אחרי כל שינוי ב‑`scripts/security-headers.mjs` להריץ `npm run vercel-json` ולעשות commit (בדיקה אוטומטית נכשלת אם הקבצים לא תואמים).
+5. ב‑Supabase להגדיר `ADMIN_ALLOWED_ORIGINS=https://admin.auto-max.co.il` (וכתובת ה‑Preview אם רוצים לבדוק אותה: `https://<project>.vercel.app`).
+
+ה‑CSP ב‑`vercel.json` מתיר חיבור ל‑`https://*.supabase.co` (Vercel לא יכול לקרוא את כתובת הפרויקט בזמן build); ב‑Cloudflare מוגבל לכתובת המדויקת של הפרויקט שלכם.
+
+### 5ב. חלופה: Cloudflare Pages (חינם, מותר לשימוש מסחרי)
+
+```bash
 npm run build
 npx wrangler login
 npx wrangler pages deploy out --project-name automax-admin
 ```
 
-**אפשרות ב – GitHub:** Cloudflare → Workers & Pages → Create → Pages → Connect to Git. Build command: `npm run build`, Output directory: `out`,
-משתני סביבה: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NODE_VERSION=22`.
-
-`npm run build` יוצר ב‑`out/` גם את `_headers` (CSP קפדני, HSTS, nosniff, Referrer-Policy, Permissions-Policy, frame-ancestors) ואת `_redirects`
-(שכתוב `/users/<id>` לעמוד המעטפת הסטטי). אחרי פריסה בדקו שהכתובת `/users/<uuid>/` נטענת.
+(או Connect to Git: Build command `npm run build`, Output `out`, אותם שני משתנים + `NODE_VERSION=22`.) `npm run build` יוצר ב‑`out/` את `_headers` ו‑`_redirects` ש‑Cloudflare קורא.
 
 ## 6. חיבור `admin.auto-max.co.il` (DNS ב‑Vangus)
 
-1. ב‑Cloudflare Pages → הפרויקט → **Custom domains → Set up a custom domain** → `admin.auto-max.co.il`.
-   Cloudflare יציג את היעד, בצורה `automax-admin.pages.dev` (השם תלוי בשם הפרויקט).
-2. במסך ניהול ה‑DNS של **Vangus** של הדומיין `auto-max.co.il` הוסיפו רשומה **אחת**:
+**Vercel:** Project → **Settings → Domains → Add** → `admin.auto-max.co.il`. Vercel יציג את הרשומה המדויקת. בדרך כלל:
 
-   | שדה | ערך |
-   |---|---|
-   | Type | `CNAME` |
-   | Name / Host | `admin` (בחלק מהממשקים: `admin.auto-max.co.il`) |
-   | Target / Value | `automax-admin.pages.dev` (בדיוק מה ש‑Cloudflare הציג, ללא `https://`) |
-   | TTL | אוטומטי / 300 |
+| שדה | ערך |
+|---|---|
+| Type | `CNAME` |
+| Name / Host | `admin` |
+| Value / Target | הערך ש‑Vercel מציג (למשל `cname.vercel-dns.com` או `<מזהה>.vercel-dns-0xx.com`) – בדיוק כפי שמופיע |
+| TTL | אוטומטי / 300 |
 
-3. אם Cloudflare מציג בנוסף רשומת אימות (בדרך כלל `TXT`) – להוסיף אותה **בדיוק** כפי שמוצגת (שם וערך). אני לא יכול לנחש אותה מראש.
-4. ממתינים לסטטוס **Active** ולתעודת ה‑HTTPS (דקות עד שעה), ואז: `curl -I https://admin.auto-max.co.il` (צפוי 200 + כותרות האבטחה).
-5. אל תשנו את הרשומות הקיימות של האתר (`auto-max.co.il`, `www`, MX וכו').
-6. ודאו ש‑`ADMIN_ALLOWED_ORIGINS` כולל `https://admin.auto-max.co.il`.
+אם Vercel מציג בנוסף רשומת אימות (`TXT`) – להוסיף אותה כפי שהיא. ההנפקה של תעודת HTTPS אוטומטית (דקות עד שעה). אל תשנו את הרשומות הקיימות של האתר (`auto-max.co.il`, `www`, MX).
+
+**Cloudflare Pages:** Custom domains → `admin.auto-max.co.il` → הרשומה: `CNAME admin → <project>.pages.dev` (כפי שמוצג שם).
+
+בדיקה: `curl -I https://admin.auto-max.co.il` – 200 וכל כותרות האבטחה; ופתיחת `/users/<uuid>/` טוענת את העמוד.
 
 ## 7. הוספת Admin
 
@@ -169,7 +192,7 @@ npx wrangler pages deploy out --project-name automax-admin
 
 ## 11. Rollback
 
-* **ממשק:** Cloudflare Pages → Deployments → Rollback לפריסה קודמת.
+* **ממשק:** Vercel → Deployments → ‏⋯ → Promote to Production על פריסה קודמת (ב‑Cloudflare: Deployments → Rollback).
 * **Edge Function:** פריסה מחדש של גרסה קודמת מה‑Git (`supabase functions deploy admin-api`), או השבתה: מחיקת הפונקציה מה‑Dashboard (הממשק יפסיק לעבוד, שום דבר אחר לא ייפגע).
 * **מסד נתונים:** `supabase/rollback/rollback_admin.sql` מסיר את פונקציות `admin_*`, `admin_users`, `admin_rate_limits` והאינדקסים. הוא **משאיר בכוונה**
   את `admin_audit_log`, `payments_archive` ואת עמודות `profiles.is_disabled` (ראיות והיסטוריה פיננסית). להחזרת `check_license` המקורי – הרצת `schema.sql`.
@@ -181,6 +204,7 @@ npx wrangler pages deploy out --project-name automax-admin
 * רשימת פעולות סגורה; פעולה לא מוכרת = 400 (ולא‑Admin מקבל 403 בלי לדעת אילו פעולות קיימות).
 * `admin_audit_log` הוא append‑only גם למנהל המסד (טריגרים) ואין לו מסך עריכה/מחיקה. סיסמאות/טוקנים/מפתחות מנוקים אוטומטית מה‑metadata.
 * מחיקת משתמש = `super_admin` + הקלדת `DELETE` + ארכוב התשלומים לפני המחיקה (`payments` נמחק ב‑CASCADE במבנה הקיים). עדיף **Disable**.
-* ה‑CSP מאפשר רק סקריפטים מ‑`self` ו‑hash מדויק של שני הסקריפטים הפנימיים של Next בכל עמוד. הדפדפן חוסם כל סקריפט שיוזרק.
+* ה‑CSP מאפשר סקריפטים מ‑`self` בלבד: שני הסקריפטים הפנימיים של Next מועברים בזמן ה‑build לקבצים חיצוניים (`/_next/static/inline/*.js`), ו‑build נכשל אם נשאר סקריפט פנימי. הדפדפן חוסם כל סקריפט שיוזרק.
 * מה שעדיין דורש פעולה שלכם מפורט בסוף [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
 "# automax-admin" 
+"# admin-automax" 
